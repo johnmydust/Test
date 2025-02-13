@@ -1,4 +1,20 @@
-for item in results:
+from datetime import datetime, timezone
+
+def format_timestamp(timestamp):
+    if not timestamp:
+        return "Never"
+    try:
+        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        return dt.strftime("%d/%m/%Y")  # Excel-friendly format
+    except ValueError:
+        return timestamp
+
+if __name__ == "__main__":
+    results = fetch_artifact_data()
+    
+    if results:
+        csv_data = []
+        for item in results:
             full_path = f"{item['repo']}/{item['path']}"
             stats = item.get('stats', [{}])[0] if 'stats' in item else item.get('stat', {})
             last_download = stats.get('downloaded')
@@ -7,7 +23,8 @@ for item in results:
             if last_download:
                 dt = datetime.fromisoformat(last_download.replace('Z', '+00:00'))
             else:
-                dt = datetime.max  # This will put "Never" at the end
+                # Create timezone-aware datetime for "Never" entries
+                dt = datetime.max.replace(tzinfo=timezone.utc)
                 
             csv_data.append([full_path, format_timestamp(last_download), dt])
 
