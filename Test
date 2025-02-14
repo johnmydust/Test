@@ -1,27 +1,364 @@
+Remote Clusters
 
-    - name: Gather across all namespaces
-      k8s_info:
-        api_version: operators.coreos.com/v1alpha1
-        kind: ClusterServiceVersion
-        namespace: all
-      register: all_csvs
+Each cluster has:
+A Pod (or multiple Pods) with your Python script collecting metrics.
+A local OTel Collector or Prometheus that sends (pushes) metrics to the central cluster. (For example, via OTLP or Prometheus remote_write.)
+Central Cluster (Observability Cluster)
 
-    - name: Filter 
-      set_fact:
-        cfs_csvs: >-
-          {{ all_csvs.resources 
-             | selectattr('spec.displayName', 'defined') 
-             | selectattr('spec.displayName', 'search', '') 
-             | list }}
+Runs the central OTel Collector to receive the metrics.
+Runs Prometheus to store the metrics.
+Runs Grafana to query Prometheus and display dashboards.
+pgsql
+Copy
+Edit
+       [Remote Cluster(s)]                          [Central Observability Cluster]
+┌─────────────────────────────┐                ┌────────────────────────────────────────┐
+│  Local OTel Collector(s)    │  OTLP/remoteW. │  Central OTel Collector (Receiver)    │
+│  or Prometheus sidecar ----->--------------->│  → Prometheus Remote Write Exporter   │
+│  with Python script        │                │  → local Prometheus instance           │
+└─────────────────────────────┘                │  → Grafana (queries Prometheus)       │
+                                               └────────────────────────────────────────┘
+2. Setting Up the Central OTel Collector
+You will deploy an OTel Collector in the central Observability cluster. It will receive incoming metric data and export it to Prometheus via Prometheus Remote Write or an alternate path. Below is an example OTel Collector configuration that accepts OTLP and pushes data to a local Prometheus instance via Remote Write.
 
-    - name: Write CFS versions to a file on the Ansible controller
-      delegate_to: localhost
-      copy:
-        dest: /tmp/cfs_report.txt
-        content: |
-          {% for cfs in cfs_csvs %}
-          Name: {{ cfs.metadata.name }}
-          Namespace: {{ cfs.metadata.namespace }}
-          Version: {{ cfs.spec.version | default('N/A') }}
-          -----------------------------------------------------
-          {% endfor %}
+2.1 Example OTel Collector Config (central-otel-collector-config.yaml)
+yaml
+Copy
+Edit
+receivers:
+  # This allows remote clusters to send OTLP data.
+  otlp:
+    protocols:
+      grpc:
+      http:
+
+processors:
+  batch: {}
+
+exporters:
+  # This exporter will send metrics to your local Prometheus
+  # instance that has remote_write enabled or a /api/v1/write endpoint.
+  prometheusremotewrite:
+    endpoint: "http://prometheus-service.monitoring:9090/api/v1/write"
+    # Depending on your environment, you may need basic auth or token:
+    # headers:
+    #   Authorization: "Bearer <token>"
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheusremotewrite]
+receivers.otlp: The OTel Collector will listen for OTLP data on default ports (4317 gRPC, 4318 HTTP). You can customize these if you’d like.
+exporters.prometheusremotewrite.endpoint: The URL for the local Prometheus instance’s remote_write endpoint. Replace "prometheus-service.monitoring:9090" with whatever your Prometheus Service URL/port is in your central cluster.
+2.2 Deploying the Central OTel Collector
+Create a ConfigMap for the OTel Collector config:
+
+bash
+Copy
+Edit
+oc create configmap central-otel-collector-cfg \
+  --from-file=central-otel-collector-config.yaml \
+  -n <your-obs-namespace>
+Create a Deployment (or DeploymentConfig) for the OTel Collector:
+
+yaml
+Copy
+Edit
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: central-otel-collector
+  namespace: <your-obs-namespace>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: central-otel-collector
+  template:
+    metadata:
+      labels:
+        app: central-otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector:latest
+          args: ["--config=/etc/otel/config.yaml"]
+          volumeMounts:
+            - name: otel-config
+              mountPath: /etc/otel/config.yaml
+              subPath: central-otel-collector-config.yaml
+      volumes:
+        - name: otel-config
+          configMap:
+            name: central-otel-collector-cfg
+Expose or Access the Collector for receiving from remote clusters:
+
+By default, the OTel Collector will listen on 0.0.0.0:4317 (gRPC) and 0.0.0.0:4318 (HTTP) for OTLP if not overridden.
+
+Consider creating a Service:
+
+yaml
+Copy
+Edit
+apiVersion: v1
+kind: Service
+metadata:
+  name: central-otel-collector-svc
+  namespace: <your-obs-namespace>
+spec:
+  selector:
+    app: central-otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+If your remote clusters can reach the central cluster’s internal network, you can use the Service DNS name. Otherwise, expose it via an OpenShift Route or networking solution.
+
+3. Setting Up Prometheus in the Central Cluster
+3.1 Deploy Prometheus
+You can deploy Prometheus via the Prometheus Operator or a standard Deployment if you prefer. Below is a simplified example of a standalone Prometheus config that enables remote_write.
+
+yaml
+Copy
+Edit
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: <your-obs-namespace>
+data:
+  prometheus.yml: |-
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      # Scrape the local OTel Collector metrics (optional if you want OTel Collector's own metrics)
+      - job_name: 'central-otel-collector'
+        static_configs:
+          - targets: ['central-otel-collector-svc.<your-obs-namespace>.svc:8888'] 
+            # If you configure the Collector to expose internal metrics at 8888 or 8889
+
+    # remote_write can also be used to forward data out if you want,
+    # but here we primarily want to *receive* data from the OTel Collector.
+    remote_write:
+      - url: http://prometheus-service.monitoring:9090/api/v1/write
+        # if you chain multiple Prometheus or if you want to forward data further
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: <your-obs-namespace>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+      - name: prometheus
+        image: prom/prometheus:latest
+        args:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus' 
+          - '--web.enable-admin-api' 
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/prometheus/
+        - name: data-volume
+          mountPath: /prometheus
+      volumes:
+      - name: config-volume
+        configMap:
+          name: prometheus-config
+          items:
+            - key: prometheus.yml
+              path: prometheus.yml
+      - name: data-volume
+        emptyDir: {}
+Note: The above is a minimal example. Using the Prometheus Operator is recommended for production in OpenShift.
+
+3.2 Service for Prometheus
+You also need a Service to access Prometheus inside the cluster:
+
+yaml
+Copy
+Edit
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-service
+  namespace: <your-obs-namespace>
+spec:
+  ports:
+    - name: web
+      port: 9090
+      targetPort: 9090
+  selector:
+    app: prometheus
+If you need external access, create an OpenShift Route:
+
+yaml
+Copy
+Edit
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: prometheus-route
+  namespace: <your-obs-namespace>
+spec:
+  to:
+    kind: Service
+    name: prometheus-service
+  port:
+    targetPort: web
+  tls:
+    termination: edge
+4. Connecting the Central OTel Collector to Prometheus
+Your OTel Collector config uses:
+
+yaml
+Copy
+Edit
+exporters:
+  prometheusremotewrite:
+    endpoint: "http://prometheus-service.<your-obs-namespace>.svc:9090/api/v1/write"
+Ensure the Service name matches.
+
+This means any metrics received by the central OTel Collector over OTLP will be exported to the local Prometheus instance’s remote_write endpoint.
+
+5. Deploying Grafana
+5.1 Basic Grafana Deployment
+Below is a minimal config. For production, consider the Grafana Operator on OpenShift.
+
+yaml
+Copy
+Edit
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: <your-obs-namespace>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:latest
+        ports:
+          - containerPort: 3000
+        env:
+          - name: GF_SECURITY_ADMIN_PASSWORD
+            value: admin  # For testing only, best to store in a Secret
+5.2 Service/Route for Grafana
+yaml
+Copy
+Edit
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-service
+  namespace: <your-obs-namespace>
+spec:
+  ports:
+    - name: web
+      port: 3000
+      targetPort: 3000
+  selector:
+    app: grafana
+Optionally, create an OpenShift Route:
+
+yaml
+Copy
+Edit
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: grafana-route
+  namespace: <your-obs-namespace>
+spec:
+  to:
+    kind: Service
+    name: grafana-service
+  port:
+    targetPort: web
+  tls:
+    termination: edge
+Access Grafana at the Route URL. The default admin user is admin, password admin (change in production).
+
+6. Configuring Grafana to Use Prometheus
+Login to Grafana using the Route or Service NodePort.
+Go to Configuration > Data Sources.
+Click Add data source, select Prometheus.
+Enter the URL of the Prometheus service (e.g., http://prometheus-service.<your-obs-namespace>.svc:9090).
+Click Save & Test to verify connectivity.
+Once configured, you can:
+
+Create Dashboards that query your metrics (e.g., otlp_* or custom metric names from your Python script).
+Validate that your remote cluster’s OTel Collector is successfully sending metrics to the central OTel Collector, which in turn writes them to Prometheus.
+7. Testing the End-to-End Flow
+Remote Cluster:
+
+Configure your local OTel Collector or agent to use:
+
+yaml
+Copy
+Edit
+exporters:
+  otlp:
+    endpoint: "<central-otel-collector-svc>.<obs-namespace>.svc.cluster.local:4317"
+    # or a Route if needed: "https://central-otel-collector-route.example.com:443"
+Deploy the Pod running Python + OTel Collector (or local Prometheus) with that config so that it pushes metrics to the central cluster.
+
+Central Cluster:
+
+Confirm that logs in the central OTel Collector Pod show receiving data from remote.
+Check Prometheus metrics: Access the Prometheus UI at /graph, search for your custom metrics from the Python script.
+Check Grafana: Build a new dashboard and query your metrics (e.g., my_python_metric_count).
+Validation:
+
+If you see your custom metric data in Grafana, the pipeline is operational.
+If not, check firewall/Route connectivity, config typos, etc.
+8. Summary
+Central OTel Collector: Receives OTLP or remote_write from remote clusters; configures an exporter to Prometheus.
+Prometheus: Deployed in the central cluster, accessible via a Service.
+Grafana: Queries Prometheus, allowing you to build dashboards for multi-cluster metrics.
+Testing: Start with a single remote cluster, verify data flow, then scale out to more clusters.
+9. Additional Considerations
+Security & Authentication
+
+Use TLS or token-based auth from remote OTel Collectors to the central cluster’s OTel Collector.
+In production, an mTLS or secure channel is recommended.
+High Availability
+
+Run multiple replicas of the central OTel Collector behind a Service if you have heavy traffic or need redundancy.
+Use persistent volume for Prometheus data or external TSDB solutions (Thanos, Cortex, etc.) for high availability and long-term storage.
+Scaling
+
+If the metric volume is large, be mindful of resource allocation for the OTel Collectors and Prometheus.
+Consider a horizontally scalable architecture (like Thanos or Mimir) if you have many clusters or high cardinality metrics.
+Dashboards & Alerts
+
+Create pre-built Grafana dashboards for common use cases.
+Configure Alertmanager if you want to set up alerts for specific metric thresholds.
+Next Steps
+Deploy the central OTel Collector, Prometheus, and Grafana in your observability cluster using the example YAML (or using Operators for a more robust production approach).
+Configure your remote cluster’s OTel Collector to push metrics (OTLP or remote_write) to the central cluster’s Collector endpoint.
+Verify end-to-end data flow in Prometheus and Grafana.
+Iterate on dashboards and refine your metrics as needed.
