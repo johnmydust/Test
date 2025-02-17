@@ -1,0 +1,26 @@
+The script gathers data on all image files and layers (SHA). Since not all layers of an image may be downloaded, we determine an image’s last usage based on the latest downloaded layer.
+
+Key points:
+
+An image is considered used if any of its layers or its manifest has a download timestamp.
+
+Layers can be shared across multiple images, so deletion must be handled carefully.
+
+Safe deletion should be done via /image deletion, ensuring unused layers are removed without breaking dependencies.
+
+
+Handling list.manifest.json (Multi-Platform Images):
+
+list.manifest.json links multiple platform-specific images.
+
+Deleting an image referenced in list.manifest.json could corrupt the multi-platform image.
+
+Before deletion, the script should check for references in list.manifest.json and prevent deletion if any associated images remain in use.
+
+
+Next Steps:
+
+1. Modify the script to set an image’s last downloaded timestamp based on its latest downloaded layer.
+
+
+2. Add a check to prevent deletion of images still referenced in list.manifest.json, unless all associated images are also marked for deletion.
