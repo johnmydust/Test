@@ -1,107 +1,28 @@
-Yes, we can modify the AQL query to find the relationships between list.manifest.json and its referenced images. Here's an approach:
+# Create a test PVC
+oc create -f test-pvc.yaml
 
-```python
-# First find list manifests
-AQL_QUERY = f'''
-items.find({{
-    "repo": {{"$eq": "{REPO}"}},
-    "path": {{"$match": "YOUR_PATH/*"}},
-    "name": {{"$eq": "list.manifest.json"}}
-}})
-.include("repo", "path", "name", "stat.downloaded", "actual_sha256")
-'''
+# Check PVC status
+oc get pvc
 
-# Then we can read the content of list.manifest.json to get references
-def analyze_list_manifest(repo, path):
-    manifest_url = f"{ARTIFACTORY_URL}/artifactory/{repo}/{path}/list.manifest.json"
-    response = requests.get(manifest_url, headers=HEADERS, verify=False)
-    if response.status_code == 200:
-        manifest_data = response.json()
-        # manifest_data will contain references to other manifests
-        manifests = manifest_data.get('manifests', [])
-        for manifest in manifests:
-            digest = manifest.get('digest')  # This is the SHA of referenced manifest
-            platform = manifest.get('platform', {})
-            arch = platform.get('architecture')
-            os = platform.get('os')
-            print(f"Referenced manifest: {digest} for {os}/{arch}")
-```
+# Create a test pod that uses this PVC
+oc create -f test-pod.yaml
 
-Or a more comprehensive AQL query:
-```python
-AQL_QUERY = f'''
-items.find({{
-    "repo": {{"$eq": "{REPO}"}},
-    "$or": [
-        {{"name": {{"$eq": "list.manifest.json"}}}},
-        {{"name": {{"$eq": "manifest.json"}}}}
-    ],
-    "path": {{"$match": "YOUR_PATH/*"}}
-}})
-.include("repo", "path", "name", "stat.downloaded", "actual_sha256")
-.sort({{"$desc": ["stat.downloaded"]}})
-'''
-```
-
-This will help us:
-1. Find all list.manifest.json files
-2. See their download timestamps
-3. Find referenced manifests
-4. Track relationships between manifests
-
-Would you like me to:
-1. Show full implementation of manifest relationship tracking?
-2. Add code to check download status of all related parts?
-3. Create a visualization of manifest relationships?
-
-The script gathers information on all files in the image registry, including image directories, which contain multiple layers (SHA hashes). However, not all layers of an image may be downloaded—some could have a timestamp, while others may show "Never."
-
-To determine when an image was last used/downloaded, the approach is:
-
-An image should be considered "used" if any of its layers have a download timestamp (even if some layers are missing timestamps).
-
-Docker may cache some layers locally, meaning an image can be used even if not all layers were pulled from the registry.
-
-
-Safe Approach for Image Usage Determination:
-
-1. An image is considered used if:
-
-Any of its layers show download activity.
-
-Its manifest shows download activity.
+# Try to write some data
+oc exec test-pod -- touch /mnt/test-file
 
 
 
-2. Handling Layer References Across Images:
+If these tests fail, check the infra node:
+bashCopy# SSH to infra
+ssh core@infra-node
 
-Layers (SHA files) exist within an image's folder.
+# Check if NFS is installed and running
+systemctl status nfs-server
 
-However, the same layer SHA can exist in multiple image folders (shared across images).
+# Check if directories exist
+ls /data
+ls /NFSV4/data
 
-Physically deleting a layer is unsafe if it is referenced by another image’s manifest.
-
-The correct way to delete an image is through /image deletion, ensuring unused layers are safely removed.
-
-
-
-
-Handling list.manifest.json (Multi-Platform Image Manifests)
-
-list.manifest.json represents a multi-platform image, linking multiple platform-specific images together.
-
-If an image referenced by list.manifest.json is deleted, it corrupts the multi-platform image, as the manifest would reference missing images.
-
-Proposed solution:
-
-Before deleting an image, check if it is referenced in list.manifest.json.
-
-If referenced, do not delete unless all associated platform-specific images are also marked for deletion.
-
-Modify the script to identify and track references in list.manifest.json before executing deletions.
-
-
-
-Next Steps for Script Modification:
-
-1. Set the latest downloaded timestamp for an image directory based on the latest downloaded layer.
+# Check exports
+cat /etc/exports
+showmount -e
