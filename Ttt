@@ -1,95 +1,22 @@
-# Create a test PVC
-oc create -f test-pvc.yaml
+- name: Get NFS server pod name
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: default
+        label_selectors:
+          - app=nfsserver
+      register: nfs_pod_info
 
-# Check PVC status
-oc get pvc
+    - name: Fail if no NFS server pod found
+      fail:
+        msg: "No NFS server pod found with label app=nfsserver."
+      when: nfs_pod_info.resources | length == 0
 
-# Create a test pod that uses this PVC
-oc create -f test-pod.yaml
-
-# Try to write some data
-oc exec test-pod -- touch /mnt/test-file
-
-
-
-If these tests fail, check the infra node:
-bashCopy# SSH to infra
-ssh core@infra-node
-
-# Check if NFS is installed and running
-systemctl status nfs-server
-
-# Check if directories exist
-ls /data
-ls /NFSV4/data
-
-# Check exports
-cat /etc/exports
-showmount -e
-
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: test-pvc
-spec:
-  accessModes:
-    - ReadWriteMany
-  resources:
-    requests:
-      storage: 1Gi
-  storageClassName: managed-nfs-storage
-
-# test-pod.yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: test-pod
-spec:
-  containers:
-  - name: test-container
-    image: busybox
-    command: [ "/bin/sh", "-c", "while true; do sleep 3600; done" ]
-    volumeMounts:
-    - name: test-volume
-      mountPath: /mnt
-  volumes:
-  - name: test-volume
-    persistentVolumeClaim:
-      claimName: test-pvc
-```
-
-Test procedure for both setups:
-```bash
-# 1. Basic file operations
-oc create -f test-pvc.yaml
-oc create -f test-pod.yaml
-oc exec test-pod -- touch /mnt/test-file
-oc exec test-pod -- mkdir /mnt/test-dir
-oc exec test-pod -- dd if=/dev/zero of=/mnt/test-file bs=1M count=100
-
-# 2. Permissions test
-oc exec test-pod -- chown 1000:1000 /mnt/test-file
-
-# 3. Multi-pod access test
-# Create second pod using same PVC
-oc create -f test-pod-2.yaml  # same as test-pod.yaml but different name
-
-# 4. NFSv4 specific features (if applicable)
-oc exec test-pod -- ls -la /mnt  # Check ACLs
-```
-
-Check on NFS server side:
-```bash
-# For basic setup
-ssh core@infra-node
-ls -la /data
-showmount -e
-systemctl status nfs-server
-
-# For full NFSv4 setup
-ssh core@infra-node
-ls -la /data
-ls -la /NFSV4/data
-showmount -e
-cat /etc/exports
-mount | grep nfs
+    - name: Create /NFSV4/data directory inside the NFS server container
+      kubernetes.core.k8s_exec:
+        namespace: default
+        pod: "{{ nfs_pod_info.resources[0].metadata.name }}"
+        container: nfsserver
+        command: "mkdir -p /NFSV4/data"
+      register: mkdir_output
+      changed_when: "'created' in mkdir_output.stdout"
