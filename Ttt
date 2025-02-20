@@ -1,22 +1,112 @@
-- name: Get NFS server pod name
-      kubernetes.core.k8s_info:
-        api_version: v1
-        kind: Pod
-        namespace: default
-        label_selectors:
-          - app=nfsserver
-      register: nfs_pod_info
+1. Containerize the Python Script
 
-    - name: Fail if no NFS server pod found
-      fail:
-        msg: "No NFS server pod found with label app=nfsserver."
-      when: nfs_pod_info.resources | length == 0
+Use a minimal Dockerfile/Containerfile that includes Python + your script files.
 
-    - name: Create /NFSV4/data directory inside the NFS server container
-      kubernetes.core.k8s_exec:
-        namespace: default
-        pod: "{{ nfs_pod_info.resources[0].metadata.name }}"
-        container: nfsserver
-        command: "mkdir -p /NFSV4/data"
-      register: mkdir_output
-      changed_when: "'created' in mkdir_output.stdout"
+Expose Prometheus metrics on a local port (e.g., :8000/metrics).
+
+
+
+2. Add OTel Collector
+
+Either in the same container (using a process supervisor) or a sidecar container within the same Pod.
+
+Ensure the Collector can scrape or receive metrics from localhost.
+
+
+
+
+
+---
+
+2. Adjust the Script (Minimal Metrics)
+
+1. Minimal Gathering
+
+Gather just a few key metrics (e.g., cluster name/version, or a simple gauge).
+
+Use a Prometheus client library (e.g., prometheus_client in Python) to expose /metrics.
+
+
+
+2. Labels & Frequency
+
+Decide on basic labels (like cluster_id) and a reasonable scrape interval (e.g., 15–30 seconds).
+
+
+
+
+
+---
+
+3. Configure OTel to Push
+
+1. Collector Input
+
+prometheus receiver (if script exports Prometheus metrics)
+
+Or otlp receiver (if script uses OTel Python instrumentation)
+
+
+
+2. Collector Output
+
+Set up a prometheusremotewrite or otlp exporter to push data to a central endpoint.
+
+
+
+
+
+---
+
+4. Remote Write Endpoint
+
+1. Central Prometheus (or OTel Collector)
+
+Enable remote_write on Prometheus or set up a central OTel Collector to accept OTLP/remote_write.
+
+Provide the endpoint URL (e.g., http://prometheus-service:9090/api/v1/write) in the local Collector config.
+
+
+
+2. Security
+
+If needed, configure token/bearer auth or TLS certificates.
+
+
+
+
+
+---
+
+5. Grafana
+
+1. Data Source
+
+Point Grafana to the central Prometheus or the OTel backend that stores metrics.
+
+
+
+2. Minimal Dashboard
+
+Create a simple panel that queries your custom metric (e.g., my_cluster_metric_count).
+
+
+
+
+
+---
+
+6. Prometheus/Thanos Considerations
+
+For PoC:
+
+A single Prometheus instance (with local storage) is usually enough.
+
+Simple retention (e.g., 15 days) is fine.
+
+
+Long-Term:
+
+If you need months of data or multiple replicas, integrate Thanos or another scalable TSDB (e.g., Mimir, Cortex).
+
+Thanos requires object storage (S3 or S3-compatible).
