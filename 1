@@ -1,0 +1,377 @@
+Below is a structured workflow for a Proof of Concept (PoC) Central Observability setup. We’ll create:
+
+1. A Ticket describing the PoC.
+
+
+2. An Ansible playbook to deploy central Prometheus (with remote write enabled) and Grafana on one cluster.
+
+
+3. An Ansible playbook to install or enable Node Exporter on multiple remote clusters so they can push or be scraped by the central Prometheus.
+
+
+
+You can adapt the code samples to your environment, inventory, and any security requirements (TLS, tokens, etc.).
+
+
+---
+
+1) Ticket: “PoC Central Observability for Multiple Clusters”
+
+Title: PoC: Central Observability for CPU/Memory Metrics from Remote Clusters
+
+Description (Short):
+
+We will set up a central Prometheus and Grafana on Cluster A to gather node metrics (CPU, memory, disk) from Node Exporter instances running on Cluster B, C, etc..
+
+Node Exporter will collect host-level metrics on each node and expose them so our central Prometheus can scrape or accept remote_write.
+
+Objective: Validate we can centrally view resource usage of multiple clusters from a single Grafana dashboard.
+
+
+Tasks:
+
+1. Deploy central Prometheus & Grafana on Cluster A (via Ansible).
+
+
+2. Enable Node Exporter on remote clusters (B, C, …).
+
+
+3. Configure scraping or remote_write so that Node Exporter metrics are sent to the central Prometheus.
+
+
+4. Validate in Grafana that metrics from each cluster are visible.
+
+
+
+Definition of Done:
+
+All relevant node metrics (CPU, memory, filesystem) from remote clusters are visible in Grafana dashboards on the central cluster.
+
+PoC can be extended later to additional metrics or integrated with advanced solutions (like Thanos).
+
+
+
+---
+
+2) Ansible: Deploy Central Prometheus (Remote Write) & Grafana
+
+Below is a single-playbook example. In practice, you may separate tasks into roles or use multiple files. Assumes:
+
+Hosts file or inventory designates [central_cluster] for Cluster A.
+
+We have cluster-admin permissions on that cluster to create namespaces and resources.
+
+We use “observability” namespace for everything.
+
+
+# File: deploy_central_observability.yml
+---
+- name: Deploy Central Prometheus and Grafana
+  hosts: central_cluster
+  gather_facts: no
+
+  vars:
+    observability_namespace: "observability"
+    prometheus_image: "prom/prometheus:latest"
+    grafana_image: "grafana/grafana:latest"
+
+  tasks:
+
+    - name: Create observability namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ observability_namespace }}"
+
+    - name: Deploy Prometheus (Deployment)
+      kubernetes.core.k8s:
+        state: present
+        namespace: "{{ observability_namespace }}"
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: prometheus
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: prometheus
+            template:
+              metadata:
+                labels:
+                  app: prometheus
+              spec:
+                containers:
+                  - name: prometheus
+                    image: "{{ prometheus_image }}"
+                    args:
+                      - '--config.file=/etc/prometheus/prometheus.yml'
+                      - '--storage.tsdb.path=/prometheus'
+                      - '--web.enable-admin-api'
+                    volumeMounts:
+                      - name: config-volume
+                        mountPath: /etc/prometheus
+                      - name: data-volume
+                        mountPath: /prometheus
+                volumes:
+                  - name: config-volume
+                    configMap:
+                      name: prometheus-config
+                  - name: data-volume
+                    emptyDir: {}
+    
+    - name: Create Prometheus ConfigMap
+      kubernetes.core.k8s:
+        state: present
+        namespace: "{{ observability_namespace }}"
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: prometheus-config
+          data:
+            prometheus.yml: |
+              global:
+                scrape_interval: 15s
+              
+              # If you want to accept remote_write from Node Exporter side (less common),
+              # you'd configure an endpoint or possibly set up an OTLP or push gateway approach.
+              # Usually Node Exporter is "scraped" by Prometheus.
+              
+              scrape_configs:
+                # We'll add or dynamically generate job configs for each cluster's node exporter
+                - job_name: 'node-exporter-remoteclusters'
+                  # Example, we might later add static_configs or service discovery
+                  static_configs:
+                    - targets: []
+                  # We'll fill in targets from the next play perhaps.
+
+    - name: Create Prometheus Service
+      kubernetes.core.k8s:
+        state: present
+        namespace: "{{ observability_namespace }}"
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: prometheus-svc
+          spec:
+            type: ClusterIP
+            selector:
+              app: prometheus
+            ports:
+              - name: web
+                port: 9090
+                targetPort: 9090
+    
+    - name: Deploy Grafana (Deployment)
+      kubernetes.core.k8s:
+        state: present
+        namespace: "{{ observability_namespace }}"
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: grafana
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: grafana
+            template:
+              metadata:
+                labels:
+                  app: grafana
+              spec:
+                containers:
+                  - name: grafana
+                    image: "{{ grafana_image }}"
+                    ports:
+                      - containerPort: 3000
+                    env:
+                      # Default credentials for PoC
+                      - name: GF_SECURITY_ADMIN_PASSWORD
+                        value: admin
+
+    - name: Create Grafana Service
+      kubernetes.core.k8s:
+        state: present
+        namespace: "{{ observability_namespace }}"
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: grafana-svc
+          spec:
+            type: ClusterIP
+            selector:
+              app: grafana
+            ports:
+              - name: web
+                port: 3000
+                targetPort: 3000
+
+Note:
+
+By default, Node Exporter is scraped by Prometheus. Node Exporter does not push metrics.
+
+So your main approach is to add each remote cluster’s Node Exporter endpoints to the scrape_configs in this central Prometheus (for example using static configs, or updating the configmap with the remote IP addresses or DNS).
+
+
+
+---
+
+3) Ansible: Enable Node Exporter on Remote Clusters
+
+Typically, you’d run Node Exporter as a DaemonSet on each remote cluster. If you’re using vanilla K8s or non-OpenShift nodes, we can demonstrate a standard DaemonSet. If it’s OpenShift, you might do a similar approach (though some folks rely on built-in Node Exporter from the cluster monitoring operator).
+
+3.1 Example Node Exporter DaemonSet
+
+# node_exporter_ds.yml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      hostNetwork: true
+      tolerations:
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:latest
+          args:
+            - '--path.rootfs=/host'
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: rootfs
+              mountPath: /host
+              readOnly: true
+      volumes:
+        - name: rootfs
+          hostPath:
+            path: /
+
+3.2 Ansible Playbook for Remote Clusters
+
+# File: deploy_node_exporter_remote.yml
+---
+- name: Deploy Node Exporter to Remote Clusters
+  hosts: remote_clusters
+  gather_facts: no
+
+  vars:
+    monitoring_namespace: "monitoring"
+
+  tasks:
+    - name: Create "monitoring" namespace (if needed)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ monitoring_namespace }}"
+
+    - name: Deploy Node Exporter DaemonSet
+      kubernetes.core.k8s:
+        state: present
+        namespace: "{{ monitoring_namespace }}"
+        definition: "{{ lookup('file','node_exporter_ds.yml') }}"
+
+This ensures that each node in the remote cluster runs a Node Exporter Pod, exposing metrics on a known port (default 9100).
+
+3.3 Configuring Central Prometheus to Scrape Remote Node Exporters
+
+If your central Prometheus can directly reach the IPs of the remote nodes on port 9100, you can:
+
+Manually add them to prometheus.yml as static targets.
+
+Or set up federation or a different method if direct scraping is not possible.
+
+Alternatively, each cluster can run a local Prometheus that does node scraping, and then remote write to the central one. But that’s a different approach.
+
+
+A quick example to update the existing ConfigMap to add static targets:
+
+scrape_configs:
+  - job_name: 'node-exporter-remoteclusters'
+    scrape_interval: 15s
+    static_configs:
+      - targets: 
+         - "nodeA.clusterB.local:9100"
+         - "nodeB.clusterB.local:9100"
+         - "nodeC.clusterC.local:9100"
+      # etc.
+
+In an automated environment, you might programmatically generate or update these targets based on your inventory or discovered node addresses.
+
+
+---
+
+Summary of the Three Steps
+
+1. Ticket: “PoC: We want central observability for multiple clusters, focusing on node-level metrics (CPU, Mem). Node Exporter will run on each remote cluster. Central Prom + Grafana on one cluster. We confirm we can see all nodes in a single Grafana dashboard.”
+
+
+2. Central Observability:
+
+Deploy a single Prometheus + Grafana in “observability” namespace on Cluster A.
+
+Make sure prometheus.yml includes a job scraping each remote node’s Node Exporter.
+
+Possibly expose the Prometheus service externally if direct scraping across the network is needed.
+
+
+
+3. Node Exporter on Remote Clusters:
+
+Use a DaemonSet so that each node in Clusters B, C, etc. runs Node Exporter.
+
+The Node Exporter listens on :9100.
+
+Provide static or dynamic config to central Prometheus so it knows where to scrape.
+
+
+
+
+By running these two Ansible playbooks against the respective clusters, you’ll have a simple multi-cluster PoC for centralized Node Exporter metrics.
+
+> Note: If you cannot do direct scraping from Cluster A → Cluster B nodes (due to networking constraints), you’d consider:
+
+Prometheus Federation, or
+
+A local Prometheus in each remote cluster that remote_writes to the central cluster.
+
+
+
+
+
+---
+
+Final Remarks
+
+This solution covers basic node-level metrics (CPU/memory/disk) via Node Exporter. It does not gather Kubernetes object states (pods, deployments) or specialized cluster data (Ceph). For that, consider Kube State Metrics or your custom script.
+
+For a PoC, you can keep it simple with static node addresses. In production, use more robust service discovery or an approach that can handle node changes.
+
+Always confirm network connectivity (firewalls, routes, etc.) so the central cluster can scrape port 9100 on remote cluster nodes.
+
+
+This should get you started with a straightforward demonstration of central Prometheus + Grafana reading Node Exporter metrics from multiple remote clusters, all automated via Ansible.
+
