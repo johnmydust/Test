@@ -1,0 +1,59 @@
+Db2 Operator, especially on OpenShift, typically relies not only on storage but potentially on other core cluster operators:
+
+Possible Dependencies and Issues:
+
+1. Cluster Storage Operator (CSO):
+Db2 relies heavily on PVC/PV functionality. If the original NFS deletion triggered issues with storage operator components, it might still be in a degraded or error state.
+
+Check quickly:
+
+oc get co storage
+oc describe co storage
+
+
+2. CSI or Storage Driver Operators:
+If your cluster uses a CSI-based NFS provisioner or other external storage drivers, ensure they are running and not degraded:
+
+oc get pods -n openshift-cluster-csi-drivers
+oc get pods -n openshift-storage
+oc get pods -n kube-system
+
+
+3. Node Health and Operator:
+Since you moved storage from worker to infra nodes, verify infra nodes are healthy and labeled correctly, and that workloads are allowed there.
+
+oc get nodes -l node-role.kubernetes.io/infra
+oc describe node <infra-node-name>
+
+
+4. Operator Lifecycle Manager (OLM):
+Db2 operator installation and CRDs management rely on OLM. If something corrupted namespaces or CRDs, the OLM may face issues.
+
+Check:
+
+oc get co operator-lifecycle-manager
+oc get pods -n openshift-operator-lifecycle-manager
+oc get pods -n openshift-marketplace
+
+
+
+
+---
+
+Recommended actions to rule out wider cluster issues quickly:
+
+1. Verify Cluster Operator Health:
+
+oc get co
+
+Make sure all operators are in the Available=True and Degraded=False state.
+
+
+2. Check Events in the openshift- namespaces:*
+
+oc get events -A | grep -iE 'error|failed|unable|mount'
+
+
+3. Check CRDs and Operator Subscriptions health:
+
+oc get subscriptions,operatorgroups,installplans -A
