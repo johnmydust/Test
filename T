@@ -1,59 +1,20 @@
-Db2 Operator, especially on OpenShift, typically relies not only on storage but potentially on other core cluster operators:
+When the namespace was deleted, all Persistent Volumes (PVs) stored on the NFS server were lost.
+The Persistent Volume Claims (PVCs) remained but were stuck in a terminating state.
+New NFS Server Setup
 
-Possible Dependencies and Issues:
+A new NFS server was deployed on the infra node, replacing the old one.
+The new NFS setup is working correctly, and new PVs/PVCs were created and bound properly.
+PVC Recreation Issue
 
-1. Cluster Storage Operator (CSO):
-Db2 relies heavily on PVC/PV functionality. If the original NFS deletion triggered issues with storage operator components, it might still be in a degraded or error state.
+The image registry is in managed mode, meaning the operator should automatically recreate PVCs.
+However, in three namespaces, the PVCs were not recreated, causing Db2 database pods to remain in a pending state.
+Other application pods relying on the database entered CrashLoopBackOff.
+Db2 Cluster Instance Not Becoming Ready
 
-Check quickly:
+During a new deployment, the Db2 cluster instance did not become ready, causing the deployment to fail.
+Storage and other dependencies were checked, but the issue persisted.
+Cluster-Wide Restart Attempt
 
-oc get co storage
-oc describe co storage
-
-
-2. CSI or Storage Driver Operators:
-If your cluster uses a CSI-based NFS provisioner or other external storage drivers, ensure they are running and not degraded:
-
-oc get pods -n openshift-cluster-csi-drivers
-oc get pods -n openshift-storage
-oc get pods -n kube-system
-
-
-3. Node Health and Operator:
-Since you moved storage from worker to infra nodes, verify infra nodes are healthy and labeled correctly, and that workloads are allowed there.
-
-oc get nodes -l node-role.kubernetes.io/infra
-oc describe node <infra-node-name>
-
-
-4. Operator Lifecycle Manager (OLM):
-Db2 operator installation and CRDs management rely on OLM. If something corrupted namespaces or CRDs, the OLM may face issues.
-
-Check:
-
-oc get co operator-lifecycle-manager
-oc get pods -n openshift-operator-lifecycle-manager
-oc get pods -n openshift-marketplace
-
-
-
-
----
-
-Recommended actions to rule out wider cluster issues quickly:
-
-1. Verify Cluster Operator Health:
-
-oc get co
-
-Make sure all operators are in the Available=True and Degraded=False state.
-
-
-2. Check Events in the openshift- namespaces:*
-
-oc get events -A | grep -iE 'error|failed|unable|mount'
-
-
-3. Check CRDs and Operator Subscriptions health:
-
-oc get subscriptions,operatorgroups,installplans -A
+Since the issue seemed related to operators not recreating storage properly, a cluster upgrade was triggered to:
+Restart all cluster operators.
+Restart nodes to ensure proper NFS mounts and storage reattachment.
