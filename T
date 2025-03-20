@@ -1,20 +1,191 @@
-When the namespace was deleted, all Persistent Volumes (PVs) stored on the NFS server were lost.
-The Persistent Volume Claims (PVCs) remained but were stuck in a terminating state.
-New NFS Server Setup
+Case A: If You Used Ephemeral Storage or a PVC with a “Delete” Reclaim Policy
+Deleting the registry pods might have also led to re-creating the PVC/PV. If the old PV was deleted and a new one was provisioned, any images that were stored in the internal registry would be gone. That means the references to those images in the internal registry would now fail with:
 
-A new NFS server was deployed on the infra node, replacing the old one.
-The new NFS setup is working correctly, and new PVs/PVCs were created and bound properly.
-PVC Recreation Issue
+vbnet
+Copy
+Edit
+denied: You are not authorized to access the specified resource
+or
 
-The image registry is in managed mode, meaning the operator should automatically recreate PVCs.
-However, in three namespaces, the PVCs were not recreated, causing Db2 database pods to remain in a pending state.
-Other application pods relying on the database entered CrashLoopBackOff.
-Db2 Cluster Instance Not Becoming Ready
+sql
+Copy
+Edit
+manifest unknown: manifest unknown
+How to Check
+List ImageStreams in the namespace that had the images:
+bash
+Copy
+Edit
+oc get is -n <namespace>
+Look for your image name/tag.
+Try pulling from that ImageStream using the internal registry reference (e.g., image-registry.openshift-image-registry.svc:5000/<namespace>/<image>:<tag>).
+If the image was truly wiped out, you’ll need to re-push it to the internal registry.
+2. Are You Pulling from a Different Namespace?
+If your new pod is in test-namespace but the image is in another-namespace, you need to grant the pulling service account:
 
-During a new deployment, the Db2 cluster instance did not become ready, causing the deployment to fail.
-Storage and other dependencies were checked, but the issue persisted.
-Cluster-Wide Restart Attempt
+bash
+Copy
+Edit
+oc policy add-role-to-user system:image-puller \
+  system:serviceaccount:test-namespace:<serviceaccount> \
+  -n another-namespace
+Otherwise, you’ll see a “denied” or “not authorized” error, because the service account doesn’t have rights to pull from that other namespace’s internal registry image.
 
-Since the issue seemed related to operators not recreating storage properly, a cluster upgrade was triggered to:
-Restart all cluster operators.
-Restart nodes to ensure proper NFS mounts and storage reattachment.
+3. Check the Pod Events for the Exact Error
+Sometimes you’ll see a more specific reason than just “denied.” For example, oc describe pod <pod-name> might show:
+
+manifest unknown: manifest unknown – The image manifest no longer exists in the registry (it was deleted).
+denied: You are not authorized to access the specified resource – The service account doesn’t have permission to pull from that namespace.
+4. Verify the Image Actually Exists in the Registry
+If you suspect the image was lost when you deleted the registry pods/PVC, try:
+
+List all repos in the registry (though this can be tricky – typically you check relevant ImageStreams).
+If you have a local copy or external backup of the image, push it back into the registry:
+bash
+Copy
+Edit
+oc import-image <my-image> --from=<external-registry>/<my-image>:<tag> -n <namespace> --confirm
+or
+bash
+Copy
+Edit
+podman login --username=<user> --password=<pass> image-registry.openshift-image-registry.svc:5000
+podman push <local-image> image-registry.openshift-image-registry.svc:5000/<namespace>/<imagename>:<tag>
+5. Confirm the Registry Operator Is Happy
+Make sure the Image Registry Operator is fully reconciled:
+
+bash
+Copy
+Edit
+oc get co image-registry
+and
+
+bash
+Copy
+Edit
+oc describe configs.imageregistry.operator.openshift.io cluster
+Look for:
+
+Available: True
+Progressing: False
+Degraded: False
+If it shows “Progressing” or “Degraded,” check operator logs or events in the openshift-image-registry namespace to see if something is still broken.
+
+TL;DR
+The operator re-created the registry pods after you deleted them.
+If your internal registry used ephemeral or reclaim-delete PV, the old images might be gone. So you’d need to re-push them.
+If you’re pulling cross-namespace, you may need system:image-puller permissions.
+Check your pod events (oc describe pod) to see if it’s “manifest unknown” vs. “not authorized.”
+With this approach—verifying the image still exists in the registry or re-pushing it, confirming your namespace permissions, and ensuring the registry is “Available”—you should be able to resolve the pull failures.
+
+
+
+
+
+
+
+You said:
+If the image was truly wiped out, you’ll need to re-push it to the internal registry.
+how to do that?
+ChatGPT said:
+Reasoned for 4 seconds
+You can re-push (re-upload) an image to the internal OpenShift registry in a couple of ways. Below are two common methods:
+
+Method 1: Using oc import-image (If the Image Exists on an External Registry)
+If your image is still available on an external registry (for example, Quay.io, Docker Hub, etc.), you can simply import it into an OpenShift ImageStream, which automatically pushes/pulls it to the internal registry. For example:
+
+Create (or reuse) an ImageStream in your desired namespace:
+
+bash
+Copy
+Edit
+oc create imagestream my-image -n my-namespace
+(Or skip this if you already have an ImageStream named “my-image.”)
+
+Import the image from the external registry:
+
+bash
+Copy
+Edit
+oc import-image my-image \
+    --from=quay.io/myorg/my-image:latest \
+    --confirm \
+    -n my-namespace
+This tells OpenShift to pull the image from quay.io/myorg/my-image:latest and store it in the internal registry under my-namespace/my-image:latest.
+Use it in your Pod/Deployment by referencing the internal registry path:
+
+arduino
+Copy
+Edit
+image: image-registry.openshift-image-registry.svc:5000/my-namespace/my-image:latest
+If your service account has permission to pull from my-namespace (or if you’re in the same namespace), your pod can pull it successfully.
+Method 2: Pushing Directly to the Internal Registry With Podman or Docker
+If you have a local image (e.g., built on your workstation) and want to push directly to the internal registry:
+
+Log in to the internal registry.
+Replace <token> with your OpenShift token, or use oc whoami -t to get it:
+
+bash
+Copy
+Edit
+podman login \
+    --username=$(oc whoami) \
+    --password=$(oc whoami -t) \
+    image-registry.openshift-image-registry.svc:5000
+(If using Docker, the syntax is similar.)
+
+Tag your local image to point to the internal registry.
+Let’s assume your local image is myimage:latest. You’d do something like:
+
+bash
+Copy
+Edit
+podman tag myimage:latest \
+    image-registry.openshift-image-registry.svc:5000/my-namespace/my-image:latest
+Push the image to your project (namespace) in OpenShift:
+
+bash
+Copy
+Edit
+podman push \
+    image-registry.openshift-image-registry.svc:5000/my-namespace/my-image:latest
+Now the image is stored in the internal registry under my-namespace/my-image.
+
+Reference it in your Pod/Deployment:
+
+arduino
+Copy
+Edit
+image: image-registry.openshift-image-registry.svc:5000/my-namespace/my-image:latest
+Extra Tips
+Make Sure Your Service Account Can Pull
+If you plan to run a pod in another namespace, grant that ServiceAccount the puller role:
+
+bash
+Copy
+Edit
+oc policy add-role-to-user system:image-puller \
+  system:serviceaccount:other-namespace:default \
+  -n my-namespace
+This ensures pods in other-namespace can pull the image from my-namespace.
+
+Check the Pod / Deployment
+After pushing the image, deploy a pod or update your Deployment with the new image reference. Example Deployment snippet:
+
+yaml
+Copy
+Edit
+spec:
+  containers:
+  - name: my-container
+    image: image-registry.openshift-image-registry.svc:5000/my-namespace/my-image:latest
+Verify the Push
+Run:
+
+bash
+Copy
+Edit
+oc get is my-image -n my-namespace -o yaml
+You should see a status.tags entry with your pushed tag, along with dockerImageReference: image-registry.openshift-image-registry.svc:5000/my-namespace/my-image@sha256:....
+
+Once the image is in the internal registry again, your pods should be able to pull it successfully.
