@@ -1,0 +1,7 @@
+avg by (cluster) (
+  (1 - (
+    node_filesystem_free_bytes{device!~"rootfs", fstype=~"ext4|xfs"} /
+    ignoring(device, mountpoint)
+    node_filesystem_size_bytes{device!~"rootfs", fstype=~"ext4|xfs"}
+  )) * 100
+)
