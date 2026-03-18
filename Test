@@ -1,0 +1,160 @@
+Current Situation
+We are in the process of migrating our build system from Ant to Gradle.
+The current system is a monolithic Ant build, where multiple targets are tightly coupled. This makes builds slow, difficult to maintain, and hard to evolve.
+What has already been done:
+We merged a Gradle wrapper into the Ant build
+Several targets have already been partially converted to Gradle
+Initial dependency and structural issues have been identified
+2. Why Gradle Wrapper Was Needed
+The Gradle wrapper was introduced to support a gradual migration strategy.
+Instead of switching everything at once:
+Gradle builds can now be executed from within the Ant build
+Existing workflows remain functional
+We can migrate targets step by step without breaking the system
+This allows us to safely transition while continuing development.
+3. Migration Approach (Phase 1)
+We are following an incremental migration strategy:
+Convert each target individually from Ant to Gradle
+Merge each converted target into the main branch
+Continue until all targets are migrated
+Once completed, the Gradle wrapper inside Ant will be removed
+Execution plan:
+Maximum of 1 converted target merged every 2–3 days
+Multiple targets can be converted in parallel
+After each merge, other targets must be revalidated, because they depend on each other
+4. Conversion Flow
+For each target:
+Convert Ant build logic to Gradle
+Ensure required files are downloaded, unpacked, and prepared
+Validate integration with other targets
+Merge into main branch
+Example observation:
+After converting one target, it successfully downloads and prepares files for other targets
+The next target exposed additional complexity and required deeper investigation
+5. Blockers Identified
+During conversion of subsequent targets, we identified a major blocker:
+Shared copyright injection logic:
+Implemented as a common build class
+Used across many projects
+Not all code follows required copyright standards
+This required deeper analysis and team discussion.
+6. Solution Implemented
+We decided to:
+Move the shared logic into a separate repository
+Consolidate all related files and constants into one common class
+Standardize usage across all builds
+This removes duplication and ensures consistency.
+7. Current Progress
+Gradle wrapper integrated into Ant ✅
+Multiple targets already converted (initial work completed) ✅
+Common copyright solution implemented ✅
+Previously, teams were blocked waiting for this shared component.
+Now:
+They can consume the common solution
+Continue converting remaining targets
+8. Phase 2 – Decoupling (Future State)
+After all targets are converted to Gradle:
+We will move into decoupling phase.
+Goals:
+Move all shared/common components to Artifactory
+Break dependencies between targets
+Ensure each build produces its own independent artifact
+9. Target Architecture
+The final system will:
+Have independent Gradle builds per target
+Produce artifacts that are consumed by other projects
+Remove the need for a monolithic build
+The same approach will be applied to all targets.
+This means:
+Changes in one part will not trigger full rebuilds
+Builds become modular and isolated
+10. Benefits
+Faster development cycle (develop → build → test → deliver)
+Reduced need for full system rebuilds
+Improved build performance through Gradle caching
+Clear dependency structure
+Easier maintenance and scalability
+11. Current Challenges
+Strong dependencies between targets
+Each merge requires revalidation of others
+Hidden dependencies discovered during migration
+Additional blockers may appear as we go deeper
+
+Key insight:
+The deeper we go into migration, the more hidden dependencies we uncover.
+
+12. Realistic Plan
+Merge 1 Gradle-converted target every 2–3 days
+Continue parallel conversion work
+Revalidate dependent targets after each merge
+Additional activity:
+Start investigating how the main build is used in other projects
+Prepare for future decoupling
+13. Summary
+Migration is ongoing using a controlled, incremental approach
+Gradle wrapper enabled safe coexistence with Ant
+Major blocker (shared copyright logic) has been resolved
+Teams are now unblocked and progressing
+We are moving toward:
+Independent, modular builds with reusable artifacts and faster delivery
+
+Using a wrapper and converting build by build is usually the safest way to move from Ant to Gradle, especially when the current system is large, coupled, and not fully understood.
+Why this approach is good
+1. It reduces migration risk
+You avoid a “big bang” rewrite. The existing Ant flow keeps working while Gradle is introduced step by step.
+2. It keeps delivery moving
+Teams do not need to wait for the full migration to finish before getting value.
+3. It exposes hidden dependencies gradually
+From what you described, that is already happening. This is actually a strength of the approach: you discover real coupling in manageable pieces instead of all at once.
+4. It allows rollback and revalidation
+If one converted target causes issues, you can isolate it, fix it, and continue without losing the whole migration.
+5. It fits your future goal
+Your end state is not just “Ant rewritten in Gradle.” It is a decoupled artifact-based build model. Incremental migration is a sensible path toward that.
+Why the wrapper makes sense
+In your case, the wrapper is acting as a bridge:
+Ant remains the orchestration layer for now
+Gradle starts taking over target by target
+Once everything is migrated, the bridge can be removed
+
+Current State (Monolithic + Scheduled Full Rebuilds)
+Mermaid
+flowchart LR
+    Change[Code change] --> Ant[Monolithic Ant build]
+
+    Ant --> A[Target A]
+    Ant --> B[Target B]
+    Ant --> C[Target C]
+    Ant --> D[Target D]
+
+    A --> Shared[Shared files / common logic]
+    B --> Shared
+    C --> Shared
+    D --> Shared
+
+    Shared --> Rebuild[Full rebuild of ALL targets]
+
+    Rebuild --> Schedule[Scheduled full builds\n(2 times per day)]
+
+    Schedule --> Cost[High resource usage\nLong build times\nWide retest scope]
+💡 Key message to say with this slide:
+“Currently, even small changes trigger full rebuilds, and additionally we run scheduled full builds twice a day, which consumes significant time and resources.”
+🚀 Planned State (Decoupled Gradle + Artifacts)
+Mermaid
+flowchart LR
+    ChangeA[Change in A] --> BuildA[Gradle Build A]
+    ChangeB[Change in B] --> BuildB[Gradle Build B]
+    ChangeC[Change in C] --> BuildC[Gradle Build C]
+
+    SharedRepo[Shared reusable components] --> Art[(Artifactory)]
+
+    BuildA --> Art
+    BuildB --> Art
+    BuildC --> Art
+
+    Art --> Consumers[Other builds / projects consume artifacts]
+
+    BuildA --> FastA[Only A rebuilt]
+    BuildB --> FastB[Caching + reuse]
+    BuildC --> FastC[Independent delivery]
+
+    FastA --> Benefit[No need for full rebuilds\nReduced validation scope\nFaster pipeline]
